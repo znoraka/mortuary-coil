@@ -69,6 +69,16 @@ function fmt(sec: number) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
+function Meter({ label, value, max, color, note }: { label: string; value: number; max: number; color?: string; note?: string }) {
+  const pct = Math.max(0, Math.min(100, (value / max) * 100))
+  return (
+    <div className="meter">
+      <div className="mlabel"><span>{label}</span><span className="dim">{note ?? `${Math.floor(value)}/${max}`}</span></div>
+      <div className="track slim"><div className="fill" style={{ width: `${pct}%`, background: color ?? '#5b8def' }} /></div>
+    </div>
+  )
+}
+
 export default function App() {
   useGameLoop()
   const s = useGame((g) => g.state)
@@ -116,7 +126,11 @@ export default function App() {
           <span>💰 {r.goldFound}</span>
           <span>📖 {r.xpFound}</span>
           <span>🔷 {r.shardsFound}</span>
-          <span>🎒 {r.satchel.length}/{B.BASE_SATCHEL + s.skills.packrat}</span>
+        </div>
+        <div className="meters">
+          <Meter label="🎒 satchel" value={r.satchel.length} max={B.BASE_SATCHEL + s.skills.packrat} color="#b07cf0" />
+          {r.direction === 'farm' && <Meter label="🔔 alarm" value={r.alarm} max={B.MAX_ALARM} color="#e0a33e" />}
+          {r.plungeFloors > 0 && <Meter label="🚪 escape odds" value={Math.round((0.9 - B.PLUNGE_RISK * r.plungeFloors) * 100)} max={100} color="#e0645c" note={`${Math.round((0.9 - B.PLUNGE_RISK * r.plungeFloors) * 100)}%`} />}
         </div>
 
         {r.undo && (
@@ -156,6 +170,7 @@ export default function App() {
             {s.lastRunSummary && (
               <div className="card report" onClick={g.dismissSummary}>{s.lastRunSummary}</div>
             )}
+            <Meter label="🗺 next waypoint" value={s.deepest % B.WAYPOINT_STEP} max={B.WAYPOINT_STEP} note={`depth ${s.deepest} → ${Math.floor(s.deepest / B.WAYPOINT_STEP) * B.WAYPOINT_STEP + B.WAYPOINT_STEP}`} />
             <h2>Waypoint</h2>
             <div className="wprow">
               {s.waypoints.map((w) => (
@@ -200,7 +215,7 @@ export default function App() {
                 </div>
               )
             })}
-            {s.stash.length > 0 && <h2>Stash {s.stash.length}/{B.STASH_CAP}</h2>}
+            {s.stash.length > 0 && <><h2>Stash</h2><Meter label="🎒 capacity" value={s.stash.length} max={B.STASH_CAP} color="#b07cf0" /></>}
             {s.stash.map((it) => (
               <ItemCard key={it.id} it={it} compare={it.unid ? undefined : s.equipment[it.slot]}>
                 <div className="evchoices">
@@ -228,9 +243,10 @@ export default function App() {
               const cost = B.skillCost(lvl)
               const maxed = lvl >= B.MAX_SKILL
               return (
-                <button key={id} className="buy" disabled={maxed || s.xp < cost} onClick={() => g.learnSkill(id)}>
-                  {B.SKILLS[id].name}{lvl > 0 && ` L${lvl}`} <b>{B.SKILLS[id].desc(Math.max(1, lvl + (maxed ? 0 : 1)))}</b>
-                  <span className="price">{maxed ? 'MAX' : `${cost}xp`}</span>
+                <button key={id} className="buy col" disabled={maxed || s.xp < cost} onClick={() => g.learnSkill(id)}>
+                  <div className="buyrow">{B.SKILLS[id].name} <b>{B.SKILLS[id].desc(Math.max(1, lvl + (maxed ? 0 : 1)))}</b><span className="price">{maxed ? 'MAX' : `${cost}xp`}</span></div>
+                  <Meter label="level" value={lvl} max={B.MAX_SKILL} color="#59b380" />
+                  {!maxed && <Meter label="xp" value={Math.min(s.xp, cost)} max={cost} />}
                 </button>
               )
             })}
@@ -242,13 +258,14 @@ export default function App() {
             <h2>Supplies</h2>
             <div className="shop">
               {(Object.keys(B.SUPPLIES) as SupplyId[]).map((id) => (
-                <button key={id} className="buy" disabled={s.gold < B.supplyPrice(id, s.deepest)} onClick={() => g.buySupply(id)}>
-                  {B.SUPPLIES[id].name} ×{s.supplies[id]} <b>{B.SUPPLIES[id].desc}</b>
-                  <span className="price">{B.supplyPrice(id, s.deepest)}g</span>
+                <button key={id} className="buy col" disabled={s.gold < B.supplyPrice(id, s.deepest)} onClick={() => g.buySupply(id)}>
+                  <div className="buyrow">{B.SUPPLIES[id].name} ×{s.supplies[id]} <b>{B.SUPPLIES[id].desc}</b><span className="price">{B.supplyPrice(id, s.deepest)}g</span></div>
+                  <Meter label="gold" value={Math.min(s.gold, B.supplyPrice(id, s.deepest))} max={B.supplyPrice(id, s.deepest)} color="#e0a33e" />
                 </button>
               ))}
             </div>
             <h2>Gamble — 🔷{B.GAMBLE_COST} per unid rare</h2>
+            <Meter label="🔷 shards" value={Math.min(s.shards, B.GAMBLE_COST)} max={B.GAMBLE_COST} color="#5bc8ef" />
             <div className="gamblerow">
               {SLOTS.map((slot) => (
                 <button key={slot} className="buy" disabled={s.shards < B.GAMBLE_COST} onClick={() => g.gamble(slot)}>{SLOT_ICON[slot]}</button>
@@ -259,8 +276,9 @@ export default function App() {
               {['common', 'magic', 'rare'].map((rar) => {
                 const n = s.stash.filter((i) => i.unid && i.rarity === rar).length
                 return (
-                  <button key={rar} className="buy" disabled={n < 3 || s.shards < B.FUSE_SHARDS} onClick={() => g.craftFuse(rar)}>
-                    {rar} → {NEXT_RARITY[rar]} <b>{n}/3 in stash</b>
+                  <button key={rar} className="buy col" disabled={n < 3 || s.shards < B.FUSE_SHARDS} onClick={() => g.craftFuse(rar)}>
+                    <div className="buyrow">{rar} → {NEXT_RARITY[rar]}</div>
+                    <Meter label="unids" value={Math.min(n, 3)} max={3} color="#b07cf0" />
                   </button>
                 )
               })}

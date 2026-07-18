@@ -740,3 +740,45 @@ h2 {
   background: #e0645c;
   transition: none;
 }
+
+.meters {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.meter {
+  width: 100%;
+}
+
+.mlabel {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+
+.buy.col {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.buyrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.buyrow b {
+  color: var(--dim);
+  font-weight: 400;
+  font-size: 11.5px;
+  flex: 1;
+}
+
+.buyrow .price {
+  font-weight: 700;
+  color: var(--accent);
+}
