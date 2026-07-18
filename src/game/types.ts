@@ -22,20 +22,40 @@ export interface Item {
   unid?: boolean
 }
 
-export type RouteId = 'catacombs' | 'vaults' | 'baron'
+export type Direction = 'up' | 'down' | 'farm'
+export type SkillId = 'butchery' | 'skin' | 'secondwind' | 'scent' | 'cartography' | 'packrat'
+export type SupplyId = 'draught' | 'torch' | 'candle' | 'ladder' | 'powder'
+
+export interface UndoEvent {
+  kind: 'kept' | 'shattered'
+  item: Item
+  replaced: Item | null // item that was pushed out of the satchel, if any
+  expiresAt: number // run timeLeft below which the undo disappears
+}
 
 export interface RunState {
-  routeId: RouteId
   floor: number
-  progress: number // 0..1 of current floor
+  progress: number // 0..1
   hp: number
   kills: number
+  direction: Direction
+  timeLeft: number // seconds
+  transitionLeft: number // seconds of floor transition remaining
+  alarm: number // farming heat stacks 0..5
+  lastBandKey: number
+  xpFound: number
   goldFound: number
   shardsFound: number
   satchel: Item[]
-  pendingDrop: Item | null
-  awaitingDescend: boolean // floor cleared → descend or extract
-  bossFloor: boolean
+  undo: UndoEvent | null
+  suppliesUsed: Partial<Record<SupplyId, boolean>>
+  loadout: SupplyId[]
+  mfBuffUntil: number // timeLeft threshold (buff active while timeLeft > this)
+  goldBuffUntil: number
+  powderCharges: number
+  secondWindUsed: boolean
+  plungeFloors: number
+  ended: null | 'extracted' | 'died'
 }
 
 export interface GameState {
@@ -44,11 +64,17 @@ export interface GameState {
   itemSeq: number
   gold: number
   shards: number
+  xp: number
   deepest: number
   runsDone: number
   deaths: number
   equipment: Record<Slot, Item | null>
-  unids: Item[]
+  stash: Item[]
+  skills: Record<SkillId, number>
+  waypoints: number[]
+  supplies: Record<SupplyId, number>
+  loadout: (SupplyId | null)[]
+  startFloor: number
   run: RunState | null
   lastRunSummary: string | null
   lastSeen: number

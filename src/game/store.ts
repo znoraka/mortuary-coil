@@ -1,30 +1,38 @@
 import { create } from 'zustand'
-import type { GameState, RouteId, Slot } from './types'
+import type { GameState, Direction, SkillId, Slot, SupplyId } from './types'
 import { tick } from './tick'
 import * as B from './balance'
-import { genItem } from './loot'
-import { mulberry32, pick } from './rng'
-import { EXTRACT_LINES } from './flavor'
+import { genItem, tierUpItem, rerollItem, tierFor, NEXT_RARITY } from './loot'
+import { mulberry32 } from './rng'
 
 const SAVE_KEY = 'ossuary-depths-save'
-const VERSION = 1
+const VERSION = 3
 
-function freshState(): GameState {
+const ZERO_SKILLS: Record<SkillId, number> = { butchery: 0, skin: 0, secondwind: 0, scent: 0, cartography: 0, packrat: 0 }
+const ZERO_SUPPLIES: Record<SupplyId, number> = { draught: 0, torch: 0, candle: 0, ladder: 0, powder: 0 }
+
+function freshState(carry?: Partial<GameState>): GameState {
   return {
     version: VERSION,
-    seed: 20260718,
-    itemSeq: 1,
-    gold: 0,
-    shards: 0,
-    deepest: 0,
-    runsDone: 0,
-    deaths: 0,
-    equipment: { weapon: null, armor: null, helm: null, boots: null, charm: null },
-    unids: [],
+    seed: carry?.seed ?? 20260719,
+    itemSeq: carry?.itemSeq ?? 1,
+    gold: carry?.gold ?? 0,
+    shards: carry?.shards ?? 0,
+    xp: 0,
+    deepest: carry?.deepest ?? 0,
+    runsDone: carry?.runsDone ?? 0,
+    deaths: carry?.deaths ?? 0,
+    equipment: carry?.equipment ?? { weapon: null, armor: null, helm: null, boots: null, charm: null },
+    stash: carry?.stash ?? [],
+    skills: { ...ZERO_SKILLS },
+    waypoints: [1, ...(carry?.deepest ? [5, 10, 15, 20, 25].filter((w) => w <= carry.deepest!) : [])],
+    supplies: { ...ZERO_SUPPLIES },
+    loadout: [null, null, null],
+    startFloor: 1,
     run: null,
     lastRunSummary: null,
     lastSeen: Date.now(),
-    log: ['The ossuary yawns below. It smells of opportunity and femurs.'],
+    log: ['The Spindle hums. Five minutes at a time, it will tolerate you.'],
   }
 }
 
@@ -32,9 +40,20 @@ function load(): GameState {
   try {
     const raw = localStorage.getItem(SAVE_KEY)
     if (!raw) return freshState()
-    const saved = JSON.parse(raw) as GameState
-    if (saved.version !== VERSION) return freshState()
-    return saved // runs are live-only; no offline sim
+    const saved = JSON.parse(raw) as GameState & { unids?: GameState['stash'] }
+    if (saved.version === VERSION) return { ...saved, run: null } // runs don't survive reloads
+    // migrate v1: keep economy + gear
+    return freshState({
+      gold: saved.gold,
+      shards: saved.shards,
+      deepest: saved.deepest,
+      runsDone: saved.runsDone,
+      deaths: saved.deaths,
+      equipment: saved.equipment,
+      stash: saved.stash ?? saved.unids ?? [],
+      seed: saved.seed,
+      itemSeq: saved.itemSeq,
+    })
   } catch {
     return freshState()
   }
@@ -49,15 +68,20 @@ const withLog = (s: GameState, msg: string) => [msg, ...s.log].slice(0, 60)
 interface Store {
   state: GameState
   advance: (n: number) => void
-  startRun: (route: RouteId) => void
-  descend: () => void
-  extract: () => void
-  keepDrop: () => void
-  shatterDrop: () => void
-  equipFromSatchelOrUnids: (id: number) => void
+  startRun: () => void
+  setDirection: (d: Direction) => void
+  undoDrop: () => void
+  setStartFloor: (f: number) => void
+  setLoadout: (slot: number, id: SupplyId | null) => void
+  buySupply: (id: SupplyId) => void
+  learnSkill: (id: SkillId) => void
+  equipItem: (id: number) => void
   shatterItem: (id: number) => void
-  gamble: (slot: Slot) => void
   identify: (id: number) => void
+  gamble: (slot: Slot) => void
+  craftTierUp: (id: number) => void
+  craftReroll: (id: number) => void
+  craftFuse: (rarity: string) => void
   dismissSummary: () => void
   hardReset: () => void
 }
@@ -67,131 +91,153 @@ export const useGame = create<Store>((set) => ({
 
   advance: (n) => set(({ state }) => (state.run ? { state: tick(state, n) } : {})),
 
-  startRun: (routeId) =>
+  startRun: () =>
     set(({ state: s }) => {
-      if (s.run) return {}
-      const route = B.ROUTES[routeId]
-      if (s.deepest < route.unlock) return {}
+      if (s.run || !s.waypoints.includes(s.startFloor)) return {}
+      const loadout = s.loadout.filter((x): x is SupplyId => !!x && s.supplies[x] > 0)
+      const supplies = { ...s.supplies }
+      for (const id of loadout) supplies[id] -= 1
       return {
         state: {
           ...s,
+          supplies,
           lastRunSummary: null,
           run: {
-            routeId,
-            floor: 1,
+            floor: s.startFloor,
             progress: 0,
             hp: B.MAX_HP,
             kills: 0,
+            direction: 'down',
+            timeLeft: B.RUN_SECONDS,
+            transitionLeft: 0,
+            alarm: 0,
+            lastBandKey: -1,
+            xpFound: 0,
             goldFound: 0,
             shardsFound: 0,
             satchel: [],
-            pendingDrop: null,
-            awaitingDescend: false,
-            bossFloor: route.bossAt === 1,
+            undo: null,
+            suppliesUsed: {},
+            loadout,
+            mfBuffUntil: Infinity,
+            goldBuffUntil: Infinity,
+            powderCharges: loadout.includes('powder') ? 3 : 0,
+            secondWindUsed: false,
+            plungeFloors: 0,
+            ended: null,
           },
-          log: withLog(s, `You descend into the ${route.name}. The door does not lock behind you, which is somehow worse.`),
+          log: withLog(s, `Descent begins at floor ${s.startFloor}. The Spindle starts its five-minute grudge.`),
         },
       }
     }),
 
-  descend: () =>
-    set(({ state: s }) => {
-      if (!s.run?.awaitingDescend) return {}
-      return { state: { ...s, run: { ...s.run, floor: s.run.floor + 1, awaitingDescend: false } } }
-    }),
+  setDirection: (d) =>
+    set(({ state: s }) => (s.run && s.run.direction !== d ? { state: { ...s, run: { ...s.run, direction: d } } } : {})),
 
-  extract: () =>
+  undoDrop: () =>
     set(({ state: s }) => {
       const r = s.run
-      if (!r || (!r.awaitingDescend && r.hp > 0)) return {}
-      const rng = mulberry32(s.seed)
-      const kept = r.satchel
-      return {
-        state: {
-          ...s,
-          seed: (s.seed + 7) >>> 0,
-          gold: s.gold + r.goldFound,
-          shards: s.shards + r.shardsFound,
-          runsDone: s.runsDone + 1,
-          unids: s.unids, // unids only from gambling/boss for now
-          run: null,
-          lastRunSummary: `✅ Extracted from floor ${r.floor}: +${r.goldFound}g, +${r.shardsFound} shards, ${kept.length} item${kept.length === 1 ? '' : 's'} in the satchel.`,
-          // satchel items land in unids list identified (they were seen in-run) → they go to a holding list via unids with unid=false
-          log: withLog(s, pick(rng, EXTRACT_LINES)),
-          equipment: s.equipment,
-          // stash satchel into unids array (identified) for town decisions
-          ...(kept.length ? { unids: [...s.unids, ...kept].slice(-B.MAX_UNIDS - B.SATCHEL_SIZE) } : {}),
-        },
-      }
-    }),
-
-  keepDrop: () =>
-    set(({ state: s }) => {
-      const r = s.run
-      if (!r?.pendingDrop) return {}
-      const it = r.pendingDrop
-      let satchel = [...r.satchel]
-      let shards = r.shardsFound
-      let logs = s.log
-      if (satchel.length >= B.SATCHEL_SIZE) {
-        // auto-swap out the lowest-score item
-        let worst = 0
-        for (let i = 1; i < satchel.length; i++) if (satchel[i].score < satchel[worst].score) worst = i
-        if (satchel[worst].score >= it.score) {
-          return { state: { ...s, run: { ...r, pendingDrop: null, shardsFound: shards + B.SHATTER_VALUE[it.rarity] }, log: withLog(s, `Satchel full of better things. ${it.name} shatters.`) } }
+      if (!r?.undo) return {}
+      const u = r.undo
+      if (u.kind === 'kept') {
+        // reverse: remove from satchel, shatter it, restore replaced item
+        let satchel = r.satchel.filter((i) => i.id !== u.item.id)
+        if (u.replaced) satchel = [...satchel, u.replaced]
+        return {
+          state: {
+            ...s,
+            run: {
+              ...r,
+              satchel,
+              shardsFound: r.shardsFound + B.SHATTER_VALUE[u.item.rarity] - (u.replaced ? B.SHATTER_VALUE[u.replaced.rarity] : 0),
+              undo: null,
+            },
+            log: withLog(s, `${u.item.name} shattered on second thought.`),
+          },
         }
-        const out = satchel.splice(worst, 1)[0]
-        shards += B.SHATTER_VALUE[out.rarity]
-        logs = withLog(s, `${out.name} shattered to make room for ${it.name}.`)
       }
-      satchel.push(it)
-      return { state: { ...s, run: { ...r, satchel, pendingDrop: null, shardsFound: shards }, log: logs } }
-    }),
-
-  shatterDrop: () =>
-    set(({ state: s }) => {
-      const r = s.run
-      if (!r?.pendingDrop) return {}
+      // was shattered → keep it instead
       return {
         state: {
           ...s,
-          run: { ...r, pendingDrop: null, shardsFound: r.shardsFound + B.SHATTER_VALUE[r.pendingDrop.rarity] },
+          run: {
+            ...r,
+            satchel: [...r.satchel, u.item],
+            shardsFound: Math.max(0, r.shardsFound - B.SHATTER_VALUE[u.item.rarity]),
+            undo: null,
+          },
+          log: withLog(s, `You fish ${u.item.name} back out of the shard pile.`),
         },
       }
     }),
 
-  equipFromSatchelOrUnids: (id) =>
+  setStartFloor: (f) => set(({ state: s }) => (s.waypoints.includes(f) && !s.run ? { state: { ...s, startFloor: f } } : {})),
+
+  setLoadout: (slot, id) =>
     set(({ state: s }) => {
-      const idx = s.unids.findIndex((i) => i.id === id)
-      if (idx < 0) return {}
-      const it = s.unids[idx]
-      if (it.unid) return {}
+      if (s.run || slot < 0 || slot > 2) return {}
+      const loadout = [...s.loadout] as (SupplyId | null)[]
+      loadout[slot] = id
+      return { state: { ...s, loadout } }
+    }),
+
+  buySupply: (id) =>
+    set(({ state: s }) => {
+      const price = B.supplyPrice(id, s.deepest)
+      if (s.gold < price) return {}
+      return { state: { ...s, gold: s.gold - price, supplies: { ...s.supplies, [id]: s.supplies[id] + 1 } } }
+    }),
+
+  learnSkill: (id) =>
+    set(({ state: s }) => {
+      const lvl = s.skills[id]
+      const cost = B.skillCost(lvl)
+      if (lvl >= B.MAX_SKILL || s.xp < cost) return {}
+      return {
+        state: {
+          ...s,
+          xp: s.xp - cost,
+          skills: { ...s.skills, [id]: lvl + 1 },
+          log: withLog(s, `${B.SKILLS[id].name} → level ${lvl + 1}.`),
+        },
+      }
+    }),
+
+  equipItem: (id) =>
+    set(({ state: s }) => {
+      const it = s.stash.find((i) => i.id === id)
+      if (!it || it.unid || s.run) return {}
       const old = s.equipment[it.slot]
-      const unids = s.unids.filter((i) => i.id !== id)
       return {
         state: {
           ...s,
           equipment: { ...s.equipment, [it.slot]: it },
-          unids,
-          shards: s.shards + (old ? B.SHATTER_VALUE[old.rarity] : 0),
-          log: withLog(s, old ? `Equipped ${it.name}. ${old.name} shatters into ${B.SHATTER_VALUE[old.rarity]} shards.` : `Equipped ${it.name}.`),
+          stash: [...s.stash.filter((i) => i.id !== id), ...(old ? [old] : [])].slice(-B.STASH_CAP),
+          log: withLog(s, `Equipped ${it.name}.`),
         },
       }
     }),
 
   shatterItem: (id) =>
     set(({ state: s }) => {
-      const it = s.unids.find((i) => i.id === id)
+      const it = s.stash.find((i) => i.id === id)
       if (!it) return {}
       const val = it.unid ? 4 : B.SHATTER_VALUE[it.rarity]
-      return {
-        state: { ...s, unids: s.unids.filter((i) => i.id !== id), shards: s.shards + val, log: withLog(s, `${it.unid ? 'The unidentified thing' : it.name} shatters into ${val} shards.`) },
-      }
+      return { state: { ...s, stash: s.stash.filter((i) => i.id !== id), shards: s.shards + val } }
+    }),
+
+  identify: (id) =>
+    set(({ state: s }) => {
+      const idx = s.stash.findIndex((i) => i.id === id && i.unid)
+      if (idx < 0 || s.gold < B.IDENTIFY_COST) return {}
+      const stash = [...s.stash]
+      stash[idx] = { ...stash[idx], unid: false }
+      return { state: { ...s, gold: s.gold - B.IDENTIFY_COST, stash, log: withLog(s, `The scribe squints. "Ah. ${stash[idx].name}."`) } }
     }),
 
   gamble: (slot) =>
     set(({ state: s }) => {
-      if (s.shards < B.GAMBLE_COST || s.unids.length >= B.MAX_UNIDS + B.SATCHEL_SIZE) return {}
+      if (s.shards < B.GAMBLE_COST || s.stash.length >= B.STASH_CAP) return {}
       const rng = mulberry32(s.seed)
       const it = genItem(s.itemSeq, Math.max(4, s.deepest), rng, 0, slot, 'rare')
       it.unid = true
@@ -201,20 +247,56 @@ export const useGame = create<Store>((set) => ({
           seed: (s.seed + 13) >>> 0,
           itemSeq: s.itemSeq + 1,
           shards: s.shards - B.GAMBLE_COST,
-          unids: [...s.unids, it],
-          log: withLog(s, `The gambler hands over something wrapped in a shroud. "No refunds. Especially no refunds."`),
+          stash: [...s.stash, it],
+          log: withLog(s, `The gambler hands over something in a shroud. "No refunds. Especially no refunds."`),
         },
       }
     }),
 
-  identify: (id) =>
+  craftTierUp: (id) =>
     set(({ state: s }) => {
-      const idx = s.unids.findIndex((i) => i.id === id && i.unid)
-      if (idx < 0 || s.gold < B.IDENTIFY_COST) return {}
-      const unids = [...s.unids]
-      unids[idx] = { ...unids[idx], unid: false }
+      const idx = s.stash.findIndex((i) => i.id === id && !i.unid)
+      const inStash = idx >= 0
+      const it = inStash ? s.stash[idx] : Object.values(s.equipment).find((e) => e?.id === id)
+      if (!it || s.shards < B.TIERUP_SHARDS || s.gold < B.TIERUP_GOLD || it.tier >= tierFor(s.deepest)) return {}
+      const up = tierUpItem(it)
+      const stash = inStash ? s.stash.map((i) => (i.id === id ? up : i)) : s.stash
+      const equipment = inStash ? s.equipment : { ...s.equipment, [it.slot]: up }
       return {
-        state: { ...s, gold: s.gold - B.IDENTIFY_COST, unids, log: withLog(s, `The scribe squints. "Ah. ${unids[idx].name}." He charges by the syllable.`) },
+        state: { ...s, shards: s.shards - B.TIERUP_SHARDS, gold: s.gold - B.TIERUP_GOLD, stash, equipment, log: withLog(s, `${up.name} reforged to tier ${up.tier}.`) },
+      }
+    }),
+
+  craftReroll: (id) =>
+    set(({ state: s }) => {
+      const idx = s.stash.findIndex((i) => i.id === id && !i.unid && (i.rarity === 'magic' || i.rarity === 'rare'))
+      if (idx < 0 || s.shards < B.REROLL_SHARDS) return {}
+      const rng = mulberry32(s.seed)
+      const rerolled = rerollItem(s.stash[idx], rng)
+      const stash = s.stash.map((i, j) => (j === idx ? rerolled : i))
+      return {
+        state: { ...s, seed: (s.seed + 29) >>> 0, shards: s.shards - B.REROLL_SHARDS, stash, log: withLog(s, `The affixes of ${rerolled.name} are renegotiated.`) },
+      }
+    }),
+
+  craftFuse: (rarity) =>
+    set(({ state: s }) => {
+      const next = NEXT_RARITY[rarity]
+      const fodder = s.stash.filter((i) => i.unid && i.rarity === rarity).slice(0, 3)
+      if (!next || fodder.length < 3 || s.shards < B.FUSE_SHARDS) return {}
+      const rng = mulberry32(s.seed)
+      const it = genItem(s.itemSeq, Math.max(4, s.deepest), rng, 0, null, next)
+      it.unid = true
+      const ids = new Set(fodder.map((f) => f.id))
+      return {
+        state: {
+          ...s,
+          seed: (s.seed + 31) >>> 0,
+          itemSeq: s.itemSeq + 1,
+          shards: s.shards - B.FUSE_SHARDS,
+          stash: [...s.stash.filter((i) => !ids.has(i.id)), it],
+          log: withLog(s, `Three shrouded somethings become one better-shrouded something.`),
+        },
       }
     }),
 

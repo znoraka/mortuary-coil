@@ -415,3 +415,106 @@ section {
   border-color: var(--ok);
   font-size: 14px;
 }
+
+.dirs {
+  display: flex;
+  gap: 8px;
+}
+
+.dirs button {
+  flex: 1;
+  min-height: 52px;
+  background: #14161d;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+}
+
+.dirs button.on {
+  background: var(--ok);
+  color: #0b0d10;
+  border-color: var(--ok);
+}
+
+.tfill {
+  background: #5b8def;
+}
+
+.undo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.undo.kept { border-color: #35509a; }
+.undo.shattered { border-color: #8a7a2e; }
+
+.undo button {
+  background: #2a2e3a;
+  color: var(--text);
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 700;
+}
+
+.wprow {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.wp {
+  min-width: 48px;
+  min-height: 44px;
+  background: #14161d;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+}
+
+.wp.sel {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.loadout {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.loadout select {
+  background: #14161d;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font: inherit;
+  padding: 10px;
+  min-height: 44px;
+}
+
+.big.go {
+  width: 100%;
+  min-height: 52px;
+  font: inherit;
+  font-weight: 700;
+  font-size: 16px;
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  border-radius: 12px;
+}

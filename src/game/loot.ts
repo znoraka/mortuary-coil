@@ -128,3 +128,49 @@ export function statsOf(equipment: Partial<Record<Slot, Item | null>>): Record<S
   }
   return t
 }
+
+// ---- crafting helpers (v3) ----
+
+export function tierUpItem(it: Item): Item {
+  const nt = it.tier + 1
+  const scale = nt / it.tier
+  const affixes = it.affixes.map((a) => {
+    const val = Math.max(a.val + 1, Math.round(a.val * scale))
+    return { ...a, val, label: relabel(a.stat, val) }
+  })
+  const implicit = { ...it.implicit, val: Math.max(it.implicit.val + 1, Math.round(it.implicit.val * scale)) }
+  implicit.label = relabel(implicit.stat, implicit.val)
+  return refinish({ ...it, tier: nt, affixes, implicit })
+}
+
+export function rerollItem(it: Item, rng: Rng): Item {
+  const n = it.affixes.length || 1
+  const pool = [...AFFIX_POOL]
+  const affixes: Affix[] = []
+  for (let i = 0; i < n && pool.length; i++) {
+    const idx = Math.floor(rng() * pool.length)
+    const def = pool.splice(idx, 1)[0]
+    const val = Math.max(1, Math.round(def.perTier * it.tier * (0.7 + rng() * 0.6)))
+    affixes.push({ stat: def.stat, val, label: relabel(def.stat, val) })
+  }
+  return refinish({ ...it, affixes })
+}
+
+function relabel(stat: StatKey, v: number): string {
+  const L: Record<StatKey, (x: number) => string> = {
+    dmg: (x) => `+${x} damage`,
+    armor: (x) => `+${x} armor`,
+    vamp: (x) => `+${x} life per kill`,
+    mf: (x) => `+${x}% magic find`,
+    greed: (x) => `+${x}% gold`,
+    haste: (x) => `+${x}% speed`,
+  }
+  return L[stat](v)
+}
+
+function refinish(it: Item): Item {
+  const W: Record<StatKey, number> = { dmg: 3, armor: 3, vamp: 8, mf: 2, greed: 1.2, haste: 2 }
+  return { ...it, score: Math.round([it.implicit, ...it.affixes].reduce((a, x) => a + x.val * W[x.stat], 0)) }
+}
+
+export const NEXT_RARITY: Record<string, Rarity | null> = { common: 'magic', magic: 'rare', rare: 'unique', unique: null }
