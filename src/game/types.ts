@@ -1,45 +1,56 @@
-export type ActivityId = 'slay' | 'train' | 'contemplate'
+export type Slot = 'weapon' | 'armor' | 'helm' | 'boots' | 'charm'
+export type Rarity = 'common' | 'magic' | 'rare' | 'unique'
 
-export interface ActiveEvent {
-  defId: string
+export type StatKey = 'dmg' | 'armor' | 'vamp' | 'mf' | 'greed' | 'haste'
+
+export interface Affix {
+  stat: StatKey
+  val: number
+  label: string
 }
 
-export interface ActiveContract {
+export interface Item {
+  id: number
+  slot: Slot
+  base: string
+  name: string
+  rarity: Rarity
+  tier: number
+  affixes: Affix[]
+  implicit: Affix
+  score: number
+  unid?: boolean
+}
+
+export type RouteId = 'catacombs' | 'vaults' | 'baron'
+
+export interface RunState {
+  routeId: RouteId
+  floor: number
+  progress: number // 0..1 of current floor
+  hp: number
   kills: number
-  done: number
-  deadline: number // ticksLived at which it expires
-  rewardLegacy: number
-  text: string
+  goldFound: number
+  shardsFound: number
+  satchel: Item[]
+  pendingDrop: Item | null
+  awaitingDescend: boolean // floor cleared → descend or extract
+  bossFloor: boolean
 }
 
 export interface GameState {
   version: number
   seed: number
-  incarnation: number
-  heartbeats: number
-  maxHeartbeats: number
-  ticksLived: number
+  itemSeq: number
   gold: number
-  legacy: number // accrued this life, banked at death
-  totalLegacy: number // permanent, survives death
-  power: number
-  wounds: number
-  activity: ActivityId
-  zoneId: string
-  bar: number // 0..1
-  bandagePrice: number
-  elixirPrice: number
-  tombLevel: number
-  reaperDebt: number // heartbeats owed to the Reaper
-  kills: number
-  dead: boolean
-  causeOfDeath: string
-  pendingEvent: ActiveEvent | null
-  nextEventAt: number // in ticksLived
-  contract: ActiveContract | null
-  contractOffer: ActiveContract | null
-  nextContractAt: number
-  boon: string | null // boon chosen at last rebirth (display only)
+  shards: number
+  deepest: number
+  runsDone: number
+  deaths: number
+  equipment: Record<Slot, Item | null>
+  unids: Item[]
+  run: RunState | null
+  lastRunSummary: string | null
   lastSeen: number
   log: string[]
 }

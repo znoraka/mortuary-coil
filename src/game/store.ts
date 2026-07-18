@@ -1,103 +1,42 @@
 import { create } from 'zustand'
-import type { GameState, ActivityId } from './types'
+import type { GameState, RouteId, Slot } from './types'
 import { tick } from './tick'
 import * as B from './balance'
-import { EVENTS, ZONES } from './data'
-import { DEATH_LINES } from './flavor'
+import { genItem } from './loot'
 import { mulberry32, pick } from './rng'
+import { EXTRACT_LINES } from './flavor'
 
-const SAVE_KEY = 'mortuary-coil-save'
-const VERSION = 2
+const SAVE_KEY = 'ossuary-depths-save'
+const VERSION = 1
 
-export interface Boon {
-  id: string
-  name: string
-  desc: string
-}
-
-export const BOONS: Boon[] = [
-  { id: 'muscle', name: 'Muscle Memory', desc: 'Begin with 12 power' },
-  { id: 'inheritance', name: 'Suspicious Inheritance', desc: 'Begin with 200 gold' },
-  { id: 'hardy', name: 'Hardy Stock', desc: 'Begin with +900 heartbeats' },
-]
-
-function freshLife(carry?: Partial<GameState> & { boonId?: string }): GameState {
-  const debt = carry?.reaperDebt ?? 0
-  const boon = carry?.boonId
-  let life = Math.max(1500, B.BASE_LIFE - debt)
-  if (boon === 'hardy') life += 900
-  const inc = (carry?.incarnation ?? 0) + 1
+function freshState(): GameState {
   return {
     version: VERSION,
-    seed: carry?.seed ?? 1337,
-    incarnation: inc,
-    heartbeats: life,
-    maxHeartbeats: life,
-    ticksLived: 0,
-    gold: boon === 'inheritance' ? 200 : 0,
-    legacy: 0,
-    totalLegacy: carry?.totalLegacy ?? 0,
-    power: boon === 'muscle' ? 12 : 0,
-    wounds: 0,
-    activity: 'slay',
-    zoneId: ZONES[0].id,
-    bar: 0,
-    bandagePrice: B.BANDAGE_BASE_PRICE,
-    elixirPrice: B.ELIXIR_BASE_PRICE,
-    tombLevel: 0,
-    reaperDebt: 0,
-    kills: 0,
-    dead: false,
-    causeOfDeath: '',
-    pendingEvent: null,
-    nextEventAt: B.EVENT_MIN_TICKS,
-    contract: null,
-    contractOffer: null,
-    nextContractAt: 200,
-    boon: boon ?? null,
+    seed: 20260718,
+    itemSeq: 1,
+    gold: 0,
+    shards: 0,
+    deepest: 0,
+    runsDone: 0,
+    deaths: 0,
+    equipment: { weapon: null, armor: null, helm: null, boots: null, charm: null },
+    unids: [],
+    run: null,
+    lastRunSummary: null,
     lastSeen: Date.now(),
-    log: carry
-      ? [
-          `Incarnation ${inc}. ${debt > 0 ? `The Reaper collected ${debt} heartbeats at the door.` : 'A clean slate, actuarially speaking.'}`,
-        ]
-      : ['You are born. The meter is running.'],
+    log: ['The ossuary yawns below. It smells of opportunity and femurs.'],
   }
-}
-
-interface Store {
-  state: GameState
-  advance: (nTicks: number) => void
-  setActivity: (a: ActivityId) => void
-  setZone: (id: string) => void
-  chooseEvent: (idx: number) => void
-  acceptContract: () => void
-  declineContract: () => void
-  buyBandage: () => void
-  buyElixir: () => void
-  buyTomb: () => void
-  takeLoan: () => void
-  rebirth: (boonId: string) => void
-  hardReset: () => void
 }
 
 function load(): GameState {
   try {
     const raw = localStorage.getItem(SAVE_KEY)
-    if (!raw) return freshLife()
+    if (!raw) return freshState()
     const saved = JSON.parse(raw) as GameState
-    if (saved.version !== VERSION) return freshLife({ totalLegacy: (saved as GameState).totalLegacy ?? 0, incarnation: (saved as GameState).incarnation ?? 0, seed: saved.seed })
-    const elapsed = Math.min(Math.max(0, Date.now() - saved.lastSeen), B.OFFLINE_CAP_MS)
-    const n = Math.floor(elapsed / B.TICK_MS)
-    const caught = n > 40 ? tick(saved, n) : saved
-    if (n > 240) {
-      caught.log = [
-        `While you were gone, ${Math.round((n * B.TICK_MS) / 60000)} minutes of your life elapsed. This is also true generally.`,
-        ...caught.log,
-      ].slice(0, 60)
-    }
-    return caught
+    if (saved.version !== VERSION) return freshState()
+    return saved // runs are live-only; no offline sim
   } catch {
-    return freshLife()
+    return freshState()
   }
 }
 
@@ -105,150 +44,184 @@ export function save(s: GameState) {
   localStorage.setItem(SAVE_KEY, JSON.stringify({ ...s, lastSeen: Date.now() }))
 }
 
-const upd = (fn: (s: GameState) => Partial<GameState> | null) => (st: { state: GameState }) => {
-  const patch = fn(st.state)
-  return patch ? { state: { ...st.state, ...patch } } : {}
+const withLog = (s: GameState, msg: string) => [msg, ...s.log].slice(0, 60)
+
+interface Store {
+  state: GameState
+  advance: (n: number) => void
+  startRun: (route: RouteId) => void
+  descend: () => void
+  extract: () => void
+  keepDrop: () => void
+  shatterDrop: () => void
+  equipFromSatchelOrUnids: (id: number) => void
+  shatterItem: (id: number) => void
+  gamble: (slot: Slot) => void
+  identify: (id: number) => void
+  dismissSummary: () => void
+  hardReset: () => void
 }
 
-function withLog(s: GameState, msg: string): string[] {
-  return [msg, ...s.log].slice(0, 60)
-}
-
-export const useGame = create<Store>((set, get) => ({
+export const useGame = create<Store>((set) => ({
   state: load(),
 
-  advance: (n) => set(({ state }) => ({ state: tick(state, n) })),
+  advance: (n) => set(({ state }) => (state.run ? { state: tick(state, n) } : {})),
 
-  setActivity: (a) => set(upd((s) => (s.activity === a || s.dead ? null : { activity: a, bar: 0 }))),
+  startRun: (routeId) =>
+    set(({ state: s }) => {
+      if (s.run) return {}
+      const route = B.ROUTES[routeId]
+      if (s.deepest < route.unlock) return {}
+      return {
+        state: {
+          ...s,
+          lastRunSummary: null,
+          run: {
+            routeId,
+            floor: 1,
+            progress: 0,
+            hp: B.MAX_HP,
+            kills: 0,
+            goldFound: 0,
+            shardsFound: 0,
+            satchel: [],
+            pendingDrop: null,
+            awaitingDescend: false,
+            bossFloor: route.bossAt === 1,
+          },
+          log: withLog(s, `You descend into the ${route.name}. The door does not lock behind you, which is somehow worse.`),
+        },
+      }
+    }),
 
-  setZone: (id) =>
-    set(
-      upd((s) => {
-        if (s.zoneId === id || s.dead) return null
-        const z = ZONES.find((x) => x.id === id)
-        if (!z) return null
-        return { zoneId: id, bar: 0, log: withLog(s, `You descend to the ${z.name}. The acoustics are ominous.`) }
-      })
-    ),
+  descend: () =>
+    set(({ state: s }) => {
+      if (!s.run?.awaitingDescend) return {}
+      return { state: { ...s, run: { ...s.run, floor: s.run.floor + 1, awaitingDescend: false } } }
+    }),
 
-  chooseEvent: (idx) =>
-    set(
-      upd((s) => {
-        if (!s.pendingEvent) return null
-        const def = EVENTS.find((e) => e.id === s.pendingEvent!.defId)
-        const c = def?.choices[idx]
-        if (!c) return { pendingEvent: null }
-        if (c.gold && c.gold < 0 && s.gold < -c.gold) return null // can't afford
-        const beats = Math.min(s.maxHeartbeats, s.heartbeats + (c.beats ?? 0))
-        if (beats <= 0) return null // don't let an event kill silently; block it
-        return {
-          pendingEvent: null,
-          gold: s.gold + (c.gold ?? 0),
-          heartbeats: beats,
-          legacy: s.legacy + (c.legacy ?? 0),
-          wounds: Math.max(0, Math.min(B.MAX_WOUNDS, s.wounds + (c.wounds ?? 0))),
-          power: Math.max(0, s.power + (c.power ?? 0)),
-          log: withLog(s, c.outcome),
+  extract: () =>
+    set(({ state: s }) => {
+      const r = s.run
+      if (!r || (!r.awaitingDescend && r.hp > 0)) return {}
+      const rng = mulberry32(s.seed)
+      const kept = r.satchel
+      return {
+        state: {
+          ...s,
+          seed: (s.seed + 7) >>> 0,
+          gold: s.gold + r.goldFound,
+          shards: s.shards + r.shardsFound,
+          runsDone: s.runsDone + 1,
+          unids: s.unids, // unids only from gambling/boss for now
+          run: null,
+          lastRunSummary: `✅ Extracted from floor ${r.floor}: +${r.goldFound}g, +${r.shardsFound} shards, ${kept.length} item${kept.length === 1 ? '' : 's'} in the satchel.`,
+          // satchel items land in unids list identified (they were seen in-run) → they go to a holding list via unids with unid=false
+          log: withLog(s, pick(rng, EXTRACT_LINES)),
+          equipment: s.equipment,
+          // stash satchel into unids array (identified) for town decisions
+          ...(kept.length ? { unids: [...s.unids, ...kept].slice(-B.MAX_UNIDS - B.SATCHEL_SIZE) } : {}),
+        },
+      }
+    }),
+
+  keepDrop: () =>
+    set(({ state: s }) => {
+      const r = s.run
+      if (!r?.pendingDrop) return {}
+      const it = r.pendingDrop
+      let satchel = [...r.satchel]
+      let shards = r.shardsFound
+      let logs = s.log
+      if (satchel.length >= B.SATCHEL_SIZE) {
+        // auto-swap out the lowest-score item
+        let worst = 0
+        for (let i = 1; i < satchel.length; i++) if (satchel[i].score < satchel[worst].score) worst = i
+        if (satchel[worst].score >= it.score) {
+          return { state: { ...s, run: { ...r, pendingDrop: null, shardsFound: shards + B.SHATTER_VALUE[it.rarity] }, log: withLog(s, `Satchel full of better things. ${it.name} shatters.`) } }
         }
-      })
-    ),
+        const out = satchel.splice(worst, 1)[0]
+        shards += B.SHATTER_VALUE[out.rarity]
+        logs = withLog(s, `${out.name} shattered to make room for ${it.name}.`)
+      }
+      satchel.push(it)
+      return { state: { ...s, run: { ...r, satchel, pendingDrop: null, shardsFound: shards }, log: logs } }
+    }),
 
-  acceptContract: () =>
-    set(
-      upd((s) => {
-        if (!s.contractOffer) return null
-        const dl = s.ticksLived + s.contractOffer.kills * 90
-        return {
-          contract: { ...s.contractOffer, deadline: dl },
-          contractOffer: null,
-          log: withLog(s, `Contract signed: ${s.contractOffer.kills} kills. The deadline is load-bearing.`),
-        }
-      })
-    ),
+  shatterDrop: () =>
+    set(({ state: s }) => {
+      const r = s.run
+      if (!r?.pendingDrop) return {}
+      return {
+        state: {
+          ...s,
+          run: { ...r, pendingDrop: null, shardsFound: r.shardsFound + B.SHATTER_VALUE[r.pendingDrop.rarity] },
+        },
+      }
+    }),
 
-  declineContract: () =>
-    set(
-      upd((s) =>
-        s.contractOffer
-          ? { contractOffer: null, nextContractAt: s.ticksLived + B.CONTRACT_OFFER_TICKS, log: withLog(s, 'Offer declined. The courier sighs, dustily.') }
-          : null
-      )
-    ),
+  equipFromSatchelOrUnids: (id) =>
+    set(({ state: s }) => {
+      const idx = s.unids.findIndex((i) => i.id === id)
+      if (idx < 0) return {}
+      const it = s.unids[idx]
+      if (it.unid) return {}
+      const old = s.equipment[it.slot]
+      const unids = s.unids.filter((i) => i.id !== id)
+      return {
+        state: {
+          ...s,
+          equipment: { ...s.equipment, [it.slot]: it },
+          unids,
+          shards: s.shards + (old ? B.SHATTER_VALUE[old.rarity] : 0),
+          log: withLog(s, old ? `Equipped ${it.name}. ${old.name} shatters into ${B.SHATTER_VALUE[old.rarity]} shards.` : `Equipped ${it.name}.`),
+        },
+      }
+    }),
 
-  buyBandage: () =>
-    set(
-      upd((s) => {
-        if (s.gold < s.bandagePrice || s.wounds < 1 || s.dead) return null
-        return {
-          gold: s.gold - s.bandagePrice,
-          wounds: s.wounds - 1,
-          bandagePrice: Math.round(s.bandagePrice * B.BANDAGE_PRICE_MULT),
-          log: withLog(s, 'A wound closes. The bandage was itemized on the invoice.'),
-        }
-      })
-    ),
+  shatterItem: (id) =>
+    set(({ state: s }) => {
+      const it = s.unids.find((i) => i.id === id)
+      if (!it) return {}
+      const val = it.unid ? 4 : B.SHATTER_VALUE[it.rarity]
+      return {
+        state: { ...s, unids: s.unids.filter((i) => i.id !== id), shards: s.shards + val, log: withLog(s, `${it.unid ? 'The unidentified thing' : it.name} shatters into ${val} shards.`) },
+      }
+    }),
 
-  buyElixir: () =>
-    set(
-      upd((s) => {
-        if (s.gold < s.elixirPrice || s.dead) return null
-        return {
-          gold: s.gold - s.elixirPrice,
-          heartbeats: Math.min(s.maxHeartbeats, s.heartbeats + B.ELIXIR_BEATS),
-          elixirPrice: Math.round(s.elixirPrice * B.ELIXIR_PRICE_MULT),
-          log: withLog(s, `The apothecary sells you ${B.ELIXIR_BEATS} heartbeats. The price of living has gone up. Again.`),
-        }
-      })
-    ),
+  gamble: (slot) =>
+    set(({ state: s }) => {
+      if (s.shards < B.GAMBLE_COST || s.unids.length >= B.MAX_UNIDS + B.SATCHEL_SIZE) return {}
+      const rng = mulberry32(s.seed)
+      const it = genItem(s.itemSeq, Math.max(4, s.deepest), rng, 0, slot, 'rare')
+      it.unid = true
+      return {
+        state: {
+          ...s,
+          seed: (s.seed + 13) >>> 0,
+          itemSeq: s.itemSeq + 1,
+          shards: s.shards - B.GAMBLE_COST,
+          unids: [...s.unids, it],
+          log: withLog(s, `The gambler hands over something wrapped in a shroud. "No refunds. Especially no refunds."`),
+        },
+      }
+    }),
 
-  buyTomb: () =>
-    set(
-      upd((s) => {
-        const price = B.TOMB_BASE_PRICE * (s.tombLevel + 1)
-        if (s.gold < price || s.dead) return null
-        return {
-          gold: s.gold - price,
-          tombLevel: s.tombLevel + 1,
-          log: withLog(s, `Vanity Tomb upgraded to tier ${s.tombLevel + 1}. Future generations will be moderately impressed.`),
-        }
-      })
-    ),
+  identify: (id) =>
+    set(({ state: s }) => {
+      const idx = s.unids.findIndex((i) => i.id === id && i.unid)
+      if (idx < 0 || s.gold < B.IDENTIFY_COST) return {}
+      const unids = [...s.unids]
+      unids[idx] = { ...unids[idx], unid: false }
+      return {
+        state: { ...s, gold: s.gold - B.IDENTIFY_COST, unids, log: withLog(s, `The scribe squints. "Ah. ${unids[idx].name}." He charges by the syllable.`) },
+      }
+    }),
 
-  takeLoan: () =>
-    set(
-      upd((s) => {
-        if (s.dead) return null
-        return {
-          heartbeats: Math.min(s.maxHeartbeats, s.heartbeats + B.LOAN_BEATS),
-          reaperDebt: s.reaperDebt + B.LOAN_OWED,
-          log: withLog(s, `The Reaper advances ${B.LOAN_BEATS} heartbeats against your next life. No receipt. You owe ${s.reaperDebt + B.LOAN_OWED}.`),
-        }
-      })
-    ),
-
-  rebirth: (boonId) => {
-    const s = get().state
-    const rng = mulberry32(s.seed)
-    const tombBonus = 1 + s.tombLevel * B.TOMB_LEGACY_BONUS
-    const cut = s.reaperDebt > 0 ? B.DEBT_LEGACY_CUT : 1
-    const banked = Math.floor(s.legacy * tombBonus * cut)
-    const next = freshLife({
-      incarnation: s.incarnation,
-      totalLegacy: s.totalLegacy + banked,
-      reaperDebt: s.reaperDebt,
-      seed: s.seed,
-      boonId,
-    })
-    next.log = [
-      `${pick(rng, DEATH_LINES)} Banked ${banked} Legacy${s.reaperDebt > 0 ? ' (after the Reaper’s cut)' : ''}.`,
-      ...next.log,
-    ]
-    set({ state: next })
-    save(next)
-  },
+  dismissSummary: () => set(({ state: s }) => ({ state: { ...s, lastRunSummary: null } })),
 
   hardReset: () => {
     localStorage.removeItem(SAVE_KEY)
-    set({ state: freshLife() })
+    set({ state: freshState() })
   },
 }))

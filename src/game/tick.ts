@@ -1,117 +1,97 @@
-import type { GameState } from './types'
+import type { GameState, RunState } from './types'
 import { mulberry32, pick } from './rng'
 import * as B from './balance'
-import { ZONES, EVENTS } from './data'
-import { MONSTERS, LOOT, TRAIN_LINES, CONTEMPLATE_LINES } from './flavor'
-
-const DURATIONS = {
-  slay: B.SLAY_SECS,
-  train: B.TRAIN_SECS,
-  contemplate: B.CONTEMPLATE_SECS,
-} as const
+import { genItem, statsOf } from './loot'
+import { MONSTERS, BOSS_INTRO } from './flavor'
 
 function log(s: GameState, msg: string) {
   s.log = [msg, ...s.log].slice(0, 60)
 }
 
-function die(s: GameState, cause: string) {
-  s.heartbeats = 0
-  s.dead = true
-  s.causeOfDeath = cause
-}
-
-// Pure fixed-timestep simulation — drives live play and offline catch-up.
+// Pure fixed-timestep run simulation. Town state doesn't tick.
 export function tick(prev: GameState, nTicks: number): GameState {
-  const s: GameState = { ...prev, log: [...prev.log] }
+  if (!prev.run) return prev
+  const s: GameState = { ...prev, run: { ...prev.run, satchel: [...prev.run.satchel] }, log: [...prev.log] }
   const rng = mulberry32(s.seed)
   s.seed = (s.seed + nTicks) >>> 0
-  const zone = ZONES.find((z) => z.id === s.zoneId) ?? ZONES[0]
+  const route = B.ROUTES[s.run!.routeId]
+  const stats = statsOf(s.equipment)
+  const dt = B.TICK_MS / 1000
 
   for (let i = 0; i < nTicks; i++) {
-    if (s.dead) break
-    s.ticksLived += 1
-    s.heartbeats -= B.drainAt(s.ticksLived, s.wounds)
-    if (s.heartbeats <= 0) {
-      die(s, s.wounds >= 3 ? 'Bled out through unbandaged optimism.' : 'Ran out of heartbeats, as scheduled.')
+    const r = s.run as RunState
+    if (!r) break
+
+    // the timer: health always drains, faster while deciding nothing
+    const drain = (B.BASE_DRAIN + B.DRAIN_PER_FLOOR * r.floor) * dt
+    r.hp -= drain
+    if (r.hp <= 0) {
+      endRunDeath(s)
+      break
+    }
+    if (r.awaitingDescend || r.pendingDrop) continue // world holds its breath, heart doesn't
+
+    // combat
+    const killRate = B.BASE_KILLS_PER_SEC * (1 + stats.dmg / 25) * (1 + stats.haste / 100)
+    const needed = B.KILLS_PER_FLOOR + r.floor
+    const isBoss = route.bossAt === r.floor
+    const monsterDps = B.MONSTER_DPS_PER_FLOOR * Math.pow(r.floor, 1.35) * (isBoss ? 2.2 : 1)
+    r.hp -= Math.max(0.1, monsterDps - stats.armor * 0.35) * dt
+    if (r.hp <= 0) {
+      endRunDeath(s)
       break
     }
 
-    // dilemma events queue up (game keeps grinding; the choice waits for you)
-    if (!s.pendingEvent && s.ticksLived >= s.nextEventAt) {
-      s.pendingEvent = { defId: pick(rng, EVENTS).id }
-      s.nextEventAt = s.ticksLived + B.EVENT_MIN_TICKS + Math.floor(rng() * B.EVENT_SPAN_TICKS)
-    }
-
-    // contract offers appear when the slot is free
-    if (!s.contract && !s.contractOffer && s.ticksLived >= s.nextContractAt) {
-      const kills = 8 + Math.floor(rng() * 8)
-      const deadline = s.ticksLived + kills * 90
-      s.contractOffer = {
-        kills,
-        done: 0,
-        deadline,
-        rewardLegacy: kills * 3,
-        text: `Cull ${kills} of the local undead. The Necropolis pays in reputation.`,
-      }
-    }
-
-    // contract deadline
-    if (s.contract && s.ticksLived > s.contract.deadline) {
-      s.wounds = Math.min(B.MAX_WOUNDS, s.wounds + 1)
-      log(s, `Contract failed. The client sends "feedback" (+1 wound). Reputation unbanked.`)
-      s.contract = null
-      s.nextContractAt = s.ticksLived + B.CONTRACT_OFFER_TICKS
-    }
-
-    const durTicks = (DURATIONS[s.activity] * 1000) / B.TICK_MS
-    const speed = s.activity === 'slay' ? 1 + s.power * 0.04 : 1
-    s.bar += speed / durTicks
-    if (s.bar < 1) continue
-    s.bar = 0
-
-    const mult = B.legacyMult(s.totalLegacy)
-    if (s.activity === 'slay') {
-      const monster = pick(rng, MONSTERS)
-      // damage scales with how outmatched you are in this zone
-      const ratio = (s.power + 8) / (zone.minPower + 8)
-      const dmgMult = Math.min(3, Math.max(0.25, 1.4 / (0.4 + ratio)))
-      const dmg = Math.round(zone.danger * dmgMult * (0.6 + rng() * 0.8))
-      s.heartbeats -= dmg
-      if (s.heartbeats <= 0) {
-        die(s, `Slain by a ${monster} in ${zone.name}. It seemed rude to survive.`)
-        break
-      }
-      if (dmgMult > 1 && rng() < 0.12 * dmgMult && s.wounds < B.MAX_WOUNDS) {
-        s.wounds += 1
-        log(s, `The ${monster} opens a wound (+0.5/s drain). Bandages exist, you know.`)
-      }
-      const gold = Math.round((4 + rng() * 5) * mult * zone.rewardMult)
-      s.gold += gold
-      s.kills += 1
-      s.legacy += Math.round(1 * zone.rewardMult)
-      if (s.contract) {
-        s.contract = { ...s.contract, done: s.contract.done + 1 }
-        if (s.contract.done >= s.contract.kills) {
-          s.legacy += s.contract.rewardLegacy
-          log(s, `Contract fulfilled. +${s.contract.rewardLegacy} Legacy, and a firm skeletal handshake.`)
-          s.contract = null
-          s.nextContractAt = s.ticksLived + B.CONTRACT_OFFER_TICKS
+    r.progress += (killRate * dt) / (needed * (isBoss ? 1.6 : 1))
+    // fractional kill accrual; loot/gold trigger on each whole kill
+    const fracKills = killRate * dt
+    r.kills += fracKills
+    if (Math.floor(r.kills) > Math.floor(r.kills - fracKills)) {
+      // a whole kill landed
+      r.hp = Math.min(B.MAX_HP, r.hp + stats.vamp)
+      const gold = Math.round((B.GOLD_PER_KILL + r.floor) * (1 + stats.greed / 100) * route.goldMult)
+      r.goldFound += gold
+      if (rng() < B.DROP_CHANCE) {
+        const it = genItem(s.itemSeq++, r.floor, rng, stats.mf, route.bias)
+        const equipped = s.equipment[it.slot]
+        const notable = it.rarity !== 'common' || (equipped ? it.score > equipped.score : true)
+        if (!notable) {
+          r.goldFound += 2 + it.tier
+        } else if (r.pendingDrop) {
+          r.shardsFound += B.SHATTER_VALUE[it.rarity]
+        } else {
+          r.pendingDrop = it
         }
       }
-      if (rng() < 0.2) {
-        s.gold += 6
-        log(s, `Slew the ${monster} (+${gold}g, −${dmg} beats). It dropped ${pick(rng, LOOT)}.`)
-      } else {
-        log(s, `Slew the ${monster}. +${gold}g, −${dmg} beats.`)
+      if (rng() < 0.18) log(s, `Slew a ${pick(rng, MONSTERS)} on floor ${r.floor}. +${gold}g.`)
+    }
+
+    if (r.progress >= 1) {
+      if (isBoss) {
+        // boss chest: guaranteed rare, real unique chance
+        const forced = rng() < 0.22 ? 'unique' : 'rare'
+        const it = genItem(s.itemSeq++, r.floor + 2, rng, stats.mf + 50, null, forced)
+        r.pendingDrop = r.pendingDrop ?? it
+        if (r.pendingDrop !== it) r.shardsFound += B.SHATTER_VALUE[it.rarity]
+        log(s, `The Baron falls. His estate enters probate — in your favor.`)
       }
-    } else if (s.activity === 'train') {
-      s.power += 1
-      if (s.power % 5 === 0) log(s, `${pick(rng, TRAIN_LINES)} Power ${s.power}.`)
-    } else {
-      const gained = Math.round(2 * mult)
-      s.legacy += gained
-      log(s, `${pick(rng, CONTEMPLATE_LINES)} +${gained} Legacy.`)
+      r.progress = 0
+      r.awaitingDescend = true
+      r.bossFloor = route.bossAt === r.floor + 1
+      if (r.bossFloor) log(s, BOSS_INTRO)
+      s.deepest = Math.max(s.deepest, r.floor)
     }
   }
   return s
+}
+
+function endRunDeath(s: GameState) {
+  const r = s.run!
+  s.gold += Math.floor(r.goldFound * B.DEATH_GOLD_KEPT)
+  s.shards += r.shardsFound
+  s.deaths += 1
+  s.runsDone += 1
+  s.lastRunSummary = `☠️ Died on floor ${r.floor}. Satchel lost (${r.satchel.length} items). Kept ${Math.floor(r.goldFound * B.DEATH_GOLD_KEPT)}g of ${r.goldFound}g.`
+  log(s, 'You die. The dungeon keeps the satchel as a gratuity.')
+  s.run = null
 }
