@@ -97,7 +97,13 @@ export default function App() {
           <div className="track"><div className="fill tfill" style={{ width: `${(r.timeLeft / B.RUN_SECONDS) * 100}%` }} /></div>
           <div className="track life"><div className="fill" style={{ width: `${hpPct}%`, background: hpPct < 25 ? '#e0645c' : '#c94f8c' }} /></div>
           <div className="track"><div className="fill act" style={{ width: `${r.direction === 'up' || r.transitionLeft > 0 ? 100 - (r.transitionLeft / B.TRANSITION_SECS) * 100 : r.progress * 100}%` }} /></div>
-          <div className="dim smallnote">{r.direction === 'up' ? 'climbing…' : r.transitionLeft > 0 ? 'moving…' : `clearing (${B.KILLS_PER_FLOOR + r.floor} kills)`}</div>
+          <div className="dim smallnote">{r.direction === 'up' ? 'climbing…' : r.transitionLeft > 0 ? 'moving…' : `floor ${Math.floor(r.progress * (B.KILLS_PER_FLOOR + r.floor))}/${B.KILLS_PER_FLOOR + r.floor} kills`}</div>
+          {r.direction !== 'up' && r.transitionLeft <= 0 && (
+            <>
+              <div className="track slim"><div className="fill mfill" style={{ width: `${(r.kills % 1) * 100}%` }} /></div>
+              <div className="dim smallnote">⚔ politely dismantling a {r.currentMonster}</div>
+            </>
+          )}
         </div>
 
         <div className="dirs">

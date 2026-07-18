@@ -731,3 +731,12 @@ h2 {
   padding: 8px 10px;
   font-size: 12.5px;
 }
+
+.track.slim {
+  height: 8px;
+}
+
+.mfill {
+  background: #e0645c;
+  transition: none;
+}

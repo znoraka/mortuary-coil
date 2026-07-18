@@ -38,6 +38,7 @@ export interface RunState {
   progress: number // 0..1
   hp: number
   kills: number
+  currentMonster: string
   direction: Direction
   timeLeft: number // seconds
   transitionLeft: number // seconds of floor transition remaining

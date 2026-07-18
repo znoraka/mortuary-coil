@@ -163,6 +163,7 @@ export function tick(prev: GameState, nTicks: number): GameState {
     r.kills += killRateBase * dt
     if (Math.floor(r.kills) > Math.floor(before)) {
       // a whole kill landed
+      r.currentMonster = pick(rng, MONSTERS)
       r.hp = Math.min(B.MAX_HP, r.hp + stats.vamp)
       const rw = Math.pow(B.REWARD_GROWTH, r.floor) * (1 + B.ALARM_REWARD * r.alarm) * (r.plungeFloors > 0 ? B.PLUNGE_REWARD_MULT : 1)
       const goldBuff = r.timeLeft > r.goldBuffUntil && r.suppliesUsed.candle ? 1.5 : 1
@@ -178,7 +179,7 @@ export function tick(prev: GameState, nTicks: number): GameState {
       if (rng() < dropChance) {
         autoResolveDrop(s, r, genItem(s.itemSeq++, r.floor, rng, mf, null))
       }
-      if (rng() < 0.1) log(s, `Slew a ${pick(rng, MONSTERS)} on floor ${r.floor}.`)
+      if (rng() < 0.1) log(s, `Slew a ${r.currentMonster} on floor ${r.floor}.`)
     }
 
     // floor clear

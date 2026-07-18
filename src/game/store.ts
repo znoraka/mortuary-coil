@@ -107,6 +107,7 @@ export const useGame = create<Store>((set) => ({
             progress: 0,
             hp: B.MAX_HP,
             kills: 0,
+            currentMonster: 'Something Damp',
             direction: 'down',
             timeLeft: B.RUN_SECONDS,
             transitionLeft: 0,
