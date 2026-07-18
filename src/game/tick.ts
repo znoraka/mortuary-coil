@@ -1,4 +1,5 @@
 import type { GameState, RunState, Item } from './types'
+import { SHRINES, ELITE_PREFIXES } from './flavor'
 import { mulberry32, pick } from './rng'
 import * as B from './balance'
 import { bandFor, bandKey } from './bands'
@@ -24,39 +25,64 @@ function moveFloor(r: RunState, delta: number) {
   }
 }
 
-function autoResolveDrop(s: GameState, r: RunState, it: Item) {
+function presentDrop(s: GameState, r: RunState, it: Item) {
   const equipped = s.equipment[it.slot]
   if (it.rarity === 'common' && (!equipped || it.score <= equipped.score)) {
     r.goldFound += 2 + it.tier
     return
   }
-  const cap = satchelCap(s)
-  if (r.satchel.length < cap) {
-    r.satchel.push(it)
-    r.undo = { kind: 'kept', item: it, replaced: null, expiresAt: r.timeLeft - 4 }
+  if (r.pendingDrop) {
+    // hands full — the lesser thing shatters itself
+    r.shardsFound += B.SHATTER_VALUE[it.rarity]
     return
   }
-  let worst = 0
-  for (let i = 1; i < r.satchel.length; i++) if (r.satchel[i].score < r.satchel[worst].score) worst = i
-  if (r.satchel[worst].score < it.score) {
-    const out = r.satchel[worst]
-    r.satchel = [...r.satchel.slice(0, worst), ...r.satchel.slice(worst + 1), it]
-    r.shardsFound += B.SHATTER_VALUE[out.rarity]
-    r.undo = { kind: 'kept', item: it, replaced: out, expiresAt: r.timeLeft - 4 }
-  } else {
-    r.shardsFound += B.SHATTER_VALUE[it.rarity]
-    r.undo = { kind: 'shattered', item: it, replaced: null, expiresAt: r.timeLeft - 4 }
+  let replaced: Item | null = null
+  if (r.satchel.length >= satchelCap(s)) {
+    let worst = 0
+    for (let i = 1; i < r.satchel.length; i++) if (r.satchel[i].score < r.satchel[worst].score) worst = i
+    replaced = r.satchel[worst]
   }
+  r.pendingDrop = { item: it, replaced, expiresAt: r.timeLeft - 10 }
 }
 
-function endRun(s: GameState, r: RunState, died: boolean, rng: () => number) {
-  s.gold += r.goldFound
-  s.shards += r.shardsFound
+export function resolveDrop(_s: GameState, r: RunState, keep: boolean) {
+  const p = r.pendingDrop
+  if (!p) return
+  r.pendingDrop = null
+  if (!keep) {
+    r.shardsFound += B.SHATTER_VALUE[p.item.rarity]
+    return
+  }
+  if (p.replaced) {
+    if (p.replaced.score >= p.item.score) {
+      r.shardsFound += B.SHATTER_VALUE[p.item.rarity]
+      return
+    }
+    r.satchel = r.satchel.filter((i) => i.id !== p.replaced!.id)
+    r.shardsFound += B.SHATTER_VALUE[p.replaced.rarity]
+  }
+  r.satchel = [...r.satchel, p.item]
+}
+
+export function applyShrine(s: GameState, r: RunState, idx: number, rng: () => number) {
+  const sh = r.shrine
+  if (!sh) return
+  r.shrine = null
+  const def = SHRINES.find((x) => x.id === sh.id)
+  if (!def || idx >= def.apply.length) return
+  def.apply[idx](s, r, rng)
+}
+
+export function endRun(s: GameState, r: RunState, died: boolean, rng: () => number) {
+  const gold = died ? Math.floor(r.goldFound / 2) : r.goldFound
+  const shards = died ? Math.floor(r.shardsFound / 2) : r.shardsFound
+  s.gold += gold
+  s.shards += shards
   s.xp += r.xpFound
   s.runsDone += 1
   if (died) {
     s.deaths += 1
-    s.lastRunSummary = `☠️ ${pick(rng, DEATH_LINES)} Floor ${r.floor}. Satchel lost (${r.satchel.length}). Kept ${r.goldFound}g · ${r.xpFound}xp · ${r.shardsFound}🔷.`
+    s.lastRunSummary = `☠️ ${pick(rng, DEATH_LINES)} Floor ${r.floor}. Satchel lost (${r.satchel.length}), half the gold and shards too. Kept ${gold}g · ${r.xpFound}xp · ${shards}🔷.`
   } else {
     if (r.satchel.length) {
       s.stash = [...s.stash, ...r.satchel].slice(-B.STASH_CAP)
@@ -82,7 +108,17 @@ export function tick(prev: GameState, nTicks: number): GameState {
     if (!r) break
 
     r.timeLeft -= dt
-    if (r.undo && r.timeLeft < r.undo.expiresAt) r.undo = null
+    if (r.pendingDrop && r.timeLeft < r.pendingDrop.expiresAt) {
+      // idle grace: auto-keep if it beats the satchel floor, else shatter
+      const p = r.pendingDrop
+      const keep = !p.replaced || p.replaced.score < p.item.score
+      resolveDrop(s, r, keep)
+      log(s, keep ? `${p.item.name} stuffed into the satchel while you weren't looking.` : `${p.item.name} shatters, unloved.`)
+    }
+    if (r.shrine && r.timeLeft < r.shrine.expiresAt) {
+      r.shrine = null
+      log(s, 'The shrine loses interest in you.')
+    }
 
     if (r.timeLeft <= 0) {
       // timer: auto-extract — unless a plunge went wrong
@@ -112,6 +148,12 @@ export function tick(prev: GameState, nTicks: number): GameState {
     }
 
     const band = bandFor(r.floor)
+    // shrines: quick two-choice moments
+    if (!r.shrine && r.timeLeft < r.nextShrineAt && r.timeLeft > 20) {
+      const def = SHRINES[Math.floor(rng() * SHRINES.length)]
+      r.shrine = { id: def.id, text: def.text, choices: def.choices, expiresAt: r.timeLeft - 12 }
+      r.nextShrineAt = r.timeLeft - (45 + rng() * 30)
+    }
     // band-entry supply triggers
     const bk = bandKey(r.floor)
     if (bk !== r.lastBandKey) {
@@ -129,7 +171,8 @@ export function tick(prev: GameState, nTicks: number): GameState {
     }
 
     // damage
-    const raw = Math.pow(r.floor, 1.5) * (1 + B.ALARM_DANGER * r.alarm) - armor * 0.35
+    const eliteMult = r.elite ? r.elite.mult : 1
+    const raw = Math.pow(r.floor, 1.5) * eliteMult * (1 + B.ALARM_DANGER * r.alarm) - armor * 0.35
     const net = Math.max(raw, -2.5) // out-geared floors heal, capped
     r.hp = Math.min(B.MAX_HP, r.hp - net * dt)
     // hp supplies
@@ -156,6 +199,13 @@ export function tick(prev: GameState, nTicks: number): GameState {
       break
     }
 
+    // elites lurk past the midpoint of some floors
+    const stepP = (killRateBase * dt) / (B.KILLS_PER_FLOOR + r.floor)
+    if (!r.elite && r.progress >= 0.5 && r.progress - stepP < 0.5 && rng() < 0.3) {
+      r.elite = { name: `${ELITE_PREFIXES[Math.floor(rng() * ELITE_PREFIXES.length)]} ${pick(rng, MONSTERS)}`, killsLeft: 3 + Math.floor(r.floor / 2), mult: 2 }
+      log(s, `An elite blocks the stairs: ${r.elite.name}. It has opinions about you.`)
+    }
+
     // combat progress
     const needed = B.KILLS_PER_FLOOR + r.floor
     r.progress += (killRateBase * dt) / needed
@@ -163,6 +213,16 @@ export function tick(prev: GameState, nTicks: number): GameState {
     r.kills += killRateBase * dt
     if (Math.floor(r.kills) > Math.floor(before)) {
       // a whole kill landed
+      if (r.elite) {
+        r.elite = { ...r.elite, killsLeft: r.elite.killsLeft - 1 }
+        if (r.elite.killsLeft <= 0) {
+          const mfE = stats.mf + 80
+          presentDrop(s, r, genItem(s.itemSeq++, r.floor + 1, rng, mfE, null))
+          r.goldFound += Math.round(10 * Math.pow(B.REWARD_GROWTH, r.floor))
+          log(s, `The ${r.elite.name} folds. It drops something interesting.`)
+          r.elite = null
+        }
+      }
       r.currentMonster = pick(rng, MONSTERS)
       r.hp = Math.min(B.MAX_HP, r.hp + stats.vamp)
       const rw = Math.pow(B.REWARD_GROWTH, r.floor) * (1 + B.ALARM_REWARD * r.alarm) * (r.plungeFloors > 0 ? B.PLUNGE_REWARD_MULT : 1)
@@ -177,7 +237,7 @@ export function tick(prev: GameState, nTicks: number): GameState {
       const mf = stats.mf + mfBuff + (band.affinity === 'loot' ? band.mult : 0)
       const dropChance = B.DROP_CHANCE * (band.affinity === 'loot' ? 1.5 : 1) * (1 - 0.12 * r.alarm)
       if (rng() < dropChance) {
-        autoResolveDrop(s, r, genItem(s.itemSeq++, r.floor, rng, mf, null))
+        presentDrop(s, r, genItem(s.itemSeq++, r.floor, rng, mf, null))
       }
       if (rng() < 0.1) log(s, `Slew a ${r.currentMonster} on floor ${r.floor}.`)
     }

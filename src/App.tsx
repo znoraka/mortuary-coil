@@ -120,7 +120,9 @@ export default function App() {
           {dirs.map(([d, label]) => (
             <button key={d} className={r.direction === d ? 'on' : ''} onClick={() => g.setDirection(d)}>{label}</button>
           ))}
+          <button className="extract" onClick={g.extractNow}>⏏</button>
         </div>
+        {r.elite && <div className="elitebanner">⚡ {r.elite.name} — {r.elite.killsLeft} to go</div>}
 
         <div className="chips">
           <span>💰 {r.goldFound}</span>
@@ -133,10 +135,28 @@ export default function App() {
           {r.plungeFloors > 0 && <Meter label="🚪 escape odds" value={Math.round((0.9 - B.PLUNGE_RISK * r.plungeFloors) * 100)} max={100} color="#e0645c" note={`${Math.round((0.9 - B.PLUNGE_RISK * r.plungeFloors) * 100)}%`} />}
         </div>
 
-        {r.undo && (
-          <div className={`undo ${r.undo.kind}`}>
-            <span className="utext">{r.undo.kind === 'kept' ? 'Kept' : 'Shattered'} {r.undo.item.name}</span>
-            <button onClick={g.undoDrop}>Undo</button>
+        {r.pendingDrop && (
+          <div className="dropcard">
+            <ItemCard it={r.pendingDrop.item} compare={s.equipment[r.pendingDrop.item.slot]}>
+              {r.pendingDrop.replaced && <div className="cmp warn">satchel full — replaces {r.pendingDrop.replaced.name}</div>}
+              <div className="evchoices">
+                <button className="buy" onClick={g.keepDrop}>Keep</button>
+                <button className="buy" onClick={g.shatterDrop}>Shatter +{B.SHATTER_VALUE[r.pendingDrop.item.rarity]}🔷</button>
+              </div>
+            </ItemCard>
+          </div>
+        )}
+
+        {r.shrine && !r.pendingDrop && (
+          <div className="shrinecard">
+            <div className="evtext">{r.shrine.text}</div>
+            <div className="evchoices">
+              {r.shrine.choices.map((c, i) => (
+                <button key={i} className="buy" onClick={() => g.chooseShrine(i)}>
+                  {c.label}{c.outcome ? ` · ${c.outcome}` : ''}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 

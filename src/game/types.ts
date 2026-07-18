@@ -26,11 +26,28 @@ export type Direction = 'up' | 'down' | 'farm'
 export type SkillId = 'butchery' | 'skin' | 'secondwind' | 'scent' | 'cartography' | 'packrat'
 export type SupplyId = 'draught' | 'torch' | 'candle' | 'ladder' | 'powder'
 
-export interface UndoEvent {
-  kind: 'kept' | 'shattered'
+export interface PendingDrop {
   item: Item
-  replaced: Item | null // item that was pushed out of the satchel, if any
-  expiresAt: number // run timeLeft below which the undo disappears
+  replaced: Item | null // satchel item that would be pushed out
+  expiresAt: number // timeLeft at which it auto-resolves (keep-if-better)
+}
+
+export interface ShrineChoice {
+  label: string
+  outcome: string
+}
+
+export interface PendingShrine {
+  id: string
+  text: string
+  choices: ShrineChoice[]
+  expiresAt: number // timeLeft at which it auto-declines
+}
+
+export interface Elite {
+  name: string
+  killsLeft: number
+  mult: number // damage multiplier while active
 }
 
 export interface RunState {
@@ -48,7 +65,10 @@ export interface RunState {
   goldFound: number
   shardsFound: number
   satchel: Item[]
-  undo: UndoEvent | null
+  pendingDrop: PendingDrop | null
+  shrine: PendingShrine | null
+  nextShrineAt: number // timeLeft threshold for next shrine
+  elite: Elite | null
   suppliesUsed: Partial<Record<SupplyId, boolean>>
   loadout: SupplyId[]
   mfBuffUntil: number // timeLeft threshold (buff active while timeLeft > this)

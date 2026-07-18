@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { GameState, Direction, SkillId, Slot, SupplyId } from './types'
-import { tick } from './tick'
+import { tick, resolveDrop, applyShrine, endRun } from './tick'
 import * as B from './balance'
 import { genItem, tierUpItem, rerollItem, tierFor, NEXT_RARITY } from './loot'
 import { mulberry32 } from './rng'
@@ -70,7 +70,10 @@ interface Store {
   advance: (n: number) => void
   startRun: () => void
   setDirection: (d: Direction) => void
-  undoDrop: () => void
+  keepDrop: () => void
+  shatterDrop: () => void
+  chooseShrine: (idx: number) => void
+  extractNow: () => void
   setStartFloor: (f: number) => void
   setLoadout: (slot: number, id: SupplyId | null) => void
   buySupply: (id: SupplyId) => void
@@ -117,7 +120,10 @@ export const useGame = create<Store>((set) => ({
             goldFound: 0,
             shardsFound: 0,
             satchel: [],
-            undo: null,
+            pendingDrop: null,
+            shrine: null,
+            nextShrineAt: B.RUN_SECONDS - 40,
+            elite: null,
             suppliesUsed: {},
             loadout,
             mfBuffUntil: Infinity,
@@ -135,41 +141,40 @@ export const useGame = create<Store>((set) => ({
   setDirection: (d) =>
     set(({ state: s }) => (s.run && s.run.direction !== d ? { state: { ...s, run: { ...s.run, direction: d } } } : {})),
 
-  undoDrop: () =>
+  keepDrop: () =>
     set(({ state: s }) => {
-      const r = s.run
-      if (!r?.undo) return {}
-      const u = r.undo
-      if (u.kind === 'kept') {
-        // reverse: remove from satchel, shatter it, restore replaced item
-        let satchel = r.satchel.filter((i) => i.id !== u.item.id)
-        if (u.replaced) satchel = [...satchel, u.replaced]
-        return {
-          state: {
-            ...s,
-            run: {
-              ...r,
-              satchel,
-              shardsFound: r.shardsFound + B.SHATTER_VALUE[u.item.rarity] - (u.replaced ? B.SHATTER_VALUE[u.replaced.rarity] : 0),
-              undo: null,
-            },
-            log: withLog(s, `${u.item.name} shattered on second thought.`),
-          },
-        }
-      }
-      // was shattered → keep it instead
-      return {
-        state: {
-          ...s,
-          run: {
-            ...r,
-            satchel: [...r.satchel, u.item],
-            shardsFound: Math.max(0, r.shardsFound - B.SHATTER_VALUE[u.item.rarity]),
-            undo: null,
-          },
-          log: withLog(s, `You fish ${u.item.name} back out of the shard pile.`),
-        },
-      }
+      if (!s.run?.pendingDrop) return {}
+      const st = { ...s, run: { ...s.run, satchel: [...s.run.satchel] } }
+      resolveDrop(st, st.run!, true)
+      return { state: st }
+    }),
+
+  shatterDrop: () =>
+    set(({ state: s }) => {
+      if (!s.run?.pendingDrop) return {}
+      const st = { ...s, run: { ...s.run, satchel: [...s.run.satchel] } }
+      resolveDrop(st, st.run!, false)
+      return { state: st }
+    }),
+
+  chooseShrine: (idx) =>
+    set(({ state: s }) => {
+      if (!s.run?.shrine) return {}
+      const st = { ...s, run: { ...s.run, satchel: [...s.run.satchel] }, log: [...s.log] }
+      const rng = mulberry32(st.seed)
+      st.seed = (st.seed + 17) >>> 0
+      applyShrine(st, st.run!, idx, rng)
+      return { state: st }
+    }),
+
+  extractNow: () =>
+    set(({ state: s }) => {
+      if (!s.run) return {}
+      const st = { ...s, run: { ...s.run, satchel: [...s.run.satchel] }, stash: [...s.stash], log: [...s.log] }
+      const rng = mulberry32(st.seed)
+      st.seed = (st.seed + 23) >>> 0
+      endRun(st, st.run!, false, rng)
+      return { state: st }
     }),
 
   setStartFloor: (f) => set(({ state: s }) => (s.waypoints.includes(f) && !s.run ? { state: { ...s, startFloor: f } } : {})),
