@@ -238,3 +238,103 @@ section {
   border: 0;
   border-radius: 12px;
 }
+
+.event {
+  border-color: #7a4fd0;
+}
+
+.event.contract {
+  border-color: #b08a3e;
+}
+
+.evtext {
+  margin: 0 0 10px;
+}
+
+.evchoices {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.evchoices .buy {
+  width: auto;
+  flex: 1;
+  justify-content: center;
+  font-weight: 600;
+}
+
+.contractbar {
+  display: flex;
+  justify-content: space-between;
+  background: var(--panel);
+  border: 1px solid #b08a3e;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+.zones {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.zone {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #14161d;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 10px;
+  font: inherit;
+  text-align: left;
+  min-height: 56px;
+  font-size: 13px;
+}
+
+.zone.sel {
+  border-color: var(--accent);
+}
+
+.zone span {
+  font-size: 12px;
+}
+
+.boonhead {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--dim);
+}
+
+.boons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.boon {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  background: #14161d;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 12px;
+  font: inherit;
+  min-height: 48px;
+}
+
+.boon.sel {
+  border-color: var(--ok);
+}
+
+.boon span {
+  color: var(--dim);
+  font-size: 13px;
+}
